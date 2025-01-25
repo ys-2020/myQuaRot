@@ -5,21 +5,16 @@ import numpy as np
 import torch
 import time
 
-from e2e.quantized_llama import modeling_llama
+from quantized_llama import modeling_llama
 import torch
 import transformers
 
-model_configs = [
-    "meta-llama/Llama-2-7b-hf",
-    # "meta-llama/Llama-2-13b-hf", 
-    # "meta-llama/Llama-2-70b-hf", 
-]
 
 benchmark_dtypes = ["int4", torch.float16]
 num_warmup_steps = 0
 num_bench_steps = 1
 
-def repeated_run(num_repeats=10):
+def repeated_run(num_repeats=2):
     def func(module):
         def _f(*args, **kwargs):
             times = []
@@ -30,10 +25,12 @@ def repeated_run(num_repeats=10):
     return func
 
 def _cleanup():
-    gc.collect()
-    torch.cuda.empty_cache()
+    pass
+    # gc.collect()
+    # torch.cuda.empty_cache()
 
 @repeated_run()
+@torch.no_grad
 def module_benchmark(module):
     # warmup
     for i in range(num_warmup_steps):
@@ -41,17 +38,18 @@ def module_benchmark(module):
     torch.cuda.synchronize()
     
     _cleanup()
-    torch.cuda.reset_max_memory_allocated()
+    # torch.cuda.reset_max_memory_allocated()
     start_time = time.perf_counter()
     
-    
+    # print(f"{num_bench_steps} steps")
     for i in range(num_bench_steps):
+        # print(222)
         out = module()
     torch.cuda.synchronize()
-    peak_memory = torch.cuda.max_memory_allocated()
+    # peak_memory = torch.cuda.max_memory_allocated()
 
     end_time = time.perf_counter()
-
+    peak_memory = 0
     return (end_time - start_time) * 1000 / num_bench_steps, peak_memory
 
 
@@ -86,6 +84,7 @@ def get_model_fp16(config_name):
 def run_prefill(model, bsz, prefill_length):
     device = model.device
     test_input = torch.randint(100, 200, (bsz, prefill_length), dtype=torch.int32, device=device)
+    # print("run prefill")
     return module_benchmark(lambda: model(test_input))
 
 
@@ -102,6 +101,7 @@ def run_decode(model, bsz, prefill_length, decode_steps):
         past_key_values.length = prefill_length
         for _ in range(decode_steps):
             model(next_input, past_key_values=past_key_values)
+    # print("run decode")
     return module_benchmark(_decode_for_multiple_steps)
     
 
@@ -138,17 +138,18 @@ def run_all_for_model(model, bsz, prefill, decode):
 
 def benchmark(args):
     
-    for config_name in model_configs:
+    for config_name in [args.model_path]:
         model = get_model_quantized(config_name)
         time_prefill_i4, time_decode_i4, time_e2e_i4, mem_i4 = run_all_for_model(
             model, args.batch_size, args.prefill_seq_len, args.decode_steps)
         del model
         _cleanup()
-        model = get_model_fp16(config_name)
-        time_prefill_f16, time_decode_f16, time_e2e_f16, mem_f16 = run_all_for_model(
-            model, args.batch_size, args.prefill_seq_len, args.decode_steps)
-        del model
-        _cleanup()
+        # model = get_model_fp16(config_name)
+        # time_prefill_f16, time_decode_f16, time_e2e_f16, mem_f16 = run_all_for_model(
+        #     model, args.batch_size, args.prefill_seq_len, args.decode_steps)
+        # del model
+        # _cleanup()
+        time_prefill_f16, time_decode_f16, time_e2e_f16, mem_f16 = 0, 0, 0, 0
 
         print(f"Prefill Int4 time: {np.mean(time_prefill_i4):.3f} +- {1.96 * np.std(time_prefill_i4):.3f}ms")
         print(f"Prefill FP16 time: {np.mean(time_prefill_f16):.3f} +- {1.96 * np.std(time_prefill_f16):.3f}ms")
@@ -166,6 +167,8 @@ def benchmark(args):
             print(f"Speedup: {np.mean(time_e2e_f16) / np.mean(time_e2e_i4):.3f}x")
             print(f'E2E & {config_name} & {args.batch_size} & {args.prefill_seq_len} & {args.decode_steps} & {np.mean(time_e2e_f16):.3f} & {np.mean(time_e2e_i4):.3f}\\\\')
         
+            time_e2e_i4_avg = np.mean(time_e2e_i4)/1000 #s
+            print(f'E2E Int4 Thoughput: {(args.batch_size * args.decode_steps / time_e2e_i4_avg)} tokens/sec')
         # table-style output
 
         print(f"Int4 memory: {np.mean(mem_i4) / (1024 * 1024 * 1024):.3f}GB +- {1.96 * np.std(mem_i4):.3f}")
@@ -177,6 +180,10 @@ def benchmark(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        '--model_path', type=str,
+    )
 
     parser.add_argument(
         '--batch_size', type=int,
